@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "types",
     "orderbook",
+    "journal",
 ]
 
 [workspace.dependencies]
 maple-types = { path = "./types" }
 maple-orderbook = { path = "./orderbook" }
+maple-journal = { path = "./journal" }
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,8 @@
+[package]
+name = "maple-journal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+maple-types = { workspace = true }
+serde = { workspace = true }
