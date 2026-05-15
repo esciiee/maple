@@ -15,8 +15,6 @@ use futures::StreamExt;
 use maple_proto::{CoreMsg, GatewayMsg};
 use maple_types::{Fill, Order, OrderbookSnapshot, Side};
 use serde::Deserialize;
-#[tokio::main]
-
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
