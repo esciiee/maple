@@ -4,6 +4,7 @@ mod reader;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -14,6 +15,8 @@ use futures::StreamExt;
 use maple_proto::{CoreMsg, GatewayMsg};
 use maple_types::{Fill, Order, OrderbookSnapshot, Side};
 use serde::Deserialize;
+#[tokio::main]
+
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -138,6 +141,49 @@ async fn post_orders(
     (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response()
 }
 
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| ws_connection(socket, state.fill_tx.subscribe()))
+}
+
+async fn ws_connection(mut socket: WebSocket, mut rx: broadcast::Receiver<Fill>) {
+    loop {
+        tokio::select! {
+            result = rx.recv() => match result {
+                Ok(fill) => {
+                    let json = match serde_json::to_string(&fill) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to serialize fill");
+                            break;
+                        }
+                    };
+                    if socket.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "ws client lagged; disconnecting");
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(Message::Ping(d))) => {
+                    if socket.send(Message::Pong(d)).await.is_err() {
+                        break;
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+}
+
 async fn get_orderbook(State(state): State<AppState>) -> impl IntoResponse {
     let b = state.book.read().await;
     Json(serde_json::json!({
@@ -186,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
     let router = Router::new()
         .route("/orders", post(post_orders))
         .route("/orderbook", get(get_orderbook))
+        .route("/ws", get(ws_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.http_addr).await?;
