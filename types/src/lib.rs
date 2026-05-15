@@ -50,12 +50,6 @@ pub struct OrderbookSnapshot {
     pub asks: Vec<Level>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RejectReason {
-    ZeroQuantity,
-    ZeroPrice,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineEvent {
     Filled {
@@ -66,9 +60,5 @@ pub enum EngineEvent {
     Resting {
         order_id: u64,
         delta: BookDelta,
-    },
-    Rejected {
-        order_id: u64,
-        reason: RejectReason,
     },
 }
