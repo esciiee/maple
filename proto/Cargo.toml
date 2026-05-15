@@ -1,0 +1,11 @@
+[package]
+name = "maple-proto"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+maple-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }

@@ -4,10 +4,15 @@ members = [
     "types",
     "orderbook",
     "journal",
+    "proto",
 ]
 
 [workspace.dependencies]
 maple-types = { path = "./types" }
 maple-orderbook = { path = "./orderbook" }
 maple-journal = { path = "./journal" }
+maple-proto = { path = "./proto" }
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+bytes = "1"
+thiserror = "2"
