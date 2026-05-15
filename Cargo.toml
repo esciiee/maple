@@ -5,6 +5,7 @@ members = [
     "orderbook",
     "journal",
     "proto",
+    "transport",
 ]
 
 [workspace.dependencies]
@@ -12,7 +13,11 @@ maple-types = { path = "./types" }
 maple-orderbook = { path = "./orderbook" }
 maple-journal = { path = "./journal" }
 maple-proto = { path = "./proto" }
+maple-transport = { path = "./transport" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 bytes = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
