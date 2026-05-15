@@ -224,9 +224,12 @@ name = "maple-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "futures",
  "maple-proto",
  "maple-transport",
  "maple-types",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -194,6 +194,11 @@ async fn handle_connection(
     write_task.abort();
 }
 
+// warning, select! does not preserve cross-channel insertion order. A broadcast
+// event (seq=N+1) can be written before a target snapshot reply (seq=N)
+// even though the publish processor enqueued them in the correct order.
+// easier fix is to replace dual-channel select! with a single mpsc per connection.
+// best job here is to include write loop as part of the events processor pipeline, eliminating the need for channels and select! altogether.
 async fn write_loop(
     mut sink: SplitSink<FramedStream, bytes::Bytes>,
     mut bcast_rx: broadcast::Receiver<CoreMsg>,
