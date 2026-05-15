@@ -1,11 +1,18 @@
 mod book;
+mod reader;
 
+use std::sync::Arc;
+
+use bytes::Bytes;
 use futures::StreamExt;
 use maple_proto::{CoreMsg, GatewayMsg};
-use maple_transport::FramedStream;
-use maple_types::OrderbookSnapshot;
+use maple_types::{Fill, OrderbookSnapshot};
 use tokio::net::TcpStream;
+use tokio::sync::{RwLock, broadcast};
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::info;
+
+use book::LocalBook;
 
 struct Config {
     gateway_id: u16,
@@ -25,26 +32,41 @@ fn load_config() -> anyhow::Result<Config> {
     Ok(Config { gateway_id, core_addr, http_addr })
 }
 
-async fn bootstrap(cfg: &Config) -> anyhow::Result<(FramedStream, OrderbookSnapshot)> {
+fn make_codec() -> LengthDelimitedCodec {
+    LengthDelimitedCodec::builder()
+        .length_field_type::<u32>()
+        .big_endian()
+        .max_frame_length(maple_transport::MAX_FRAME_LEN)
+        .new_codec()
+}
+
+async fn bootstrap(
+    cfg: &Config,
+) -> anyhow::Result<(
+    FramedRead<tokio::net::tcp::OwnedReadHalf, LengthDelimitedCodec>,
+    FramedWrite<tokio::net::tcp::OwnedWriteHalf, LengthDelimitedCodec>,
+    OrderbookSnapshot,
+)> {
     let stream = TcpStream::connect(&cfg.core_addr).await?;
     info!(core_addr = %cfg.core_addr, "connected to core");
 
-    let mut framed = maple_transport::frame(stream);
+    let (read_half, write_half) = stream.into_split();
+    let mut read_framed = FramedRead::new(read_half, make_codec());
+    let mut write_framed = FramedWrite::new(write_half, make_codec());
 
     let subscribe_msg = GatewayMsg::Subscribe { connection_id: cfg.gateway_id as u64 };
     let payload = serde_json::to_vec(&subscribe_msg)?;
-    futures::SinkExt::send(&mut framed, bytes::Bytes::from(payload)).await?;
+    futures::SinkExt::send(&mut write_framed, Bytes::from(payload)).await?;
     info!(gateway_id = cfg.gateway_id, "sent Subscribe");
 
-    // the event reply may be fetched before the snapshot reply even though the publish processor enqueues them in order.
-    // look for snapshot reply in the stream and buffer any events until it arrives, then return the snapshot and buffered events together.
+    // Discard any Event frames that arrive before the SnapshotReply.
+    // See DESIGN.md "KNOWN ORDERING HAZARD" — the select! in core's write_loop
+    // can deliver a broadcast event before the targeted snapshot reply.
     let snap = loop {
-        match framed.next().await {
+        match read_framed.next().await {
             Some(Ok(frame)) => match serde_json::from_slice::<CoreMsg>(&frame)? {
                 CoreMsg::SnapshotReply { snap } => break snap,
-                CoreMsg::Event { .. } => {
-                    // discard — delta is for a seq before our snapshot baseline
-                }
+                CoreMsg::Event { .. } => {}
             },
             Some(Err(e)) => return Err(e.into()),
             None => anyhow::bail!("core disconnected before sending snapshot"),
@@ -52,7 +74,7 @@ async fn bootstrap(cfg: &Config) -> anyhow::Result<(FramedStream, OrderbookSnaps
     };
 
     info!(snap_seq = snap.seq, "received snapshot");
-    Ok((framed, snap))
+    Ok((read_framed, write_framed, snap))
 }
 
 #[tokio::main]
@@ -72,16 +94,22 @@ async fn main() -> anyhow::Result<()> {
         "maple-gateway starting"
     );
 
-    let (_framed, snap) = bootstrap(&cfg).await?;
+    let (read_framed, _write_framed, snap) = bootstrap(&cfg).await?;
 
-    let mut local_book = book::LocalBook::default();
-    local_book.apply_snapshot(&snap);
+    let book = Arc::new(RwLock::new(LocalBook::default()));
+    book.write().await.apply_snapshot(&snap);
     info!(
-        snap_seq = local_book.seq,
-        bids = local_book.bids.len(),
-        asks = local_book.asks.len(),
+        snap_seq = snap.seq,
+        bids = snap.bids.len(),
+        asks = snap.asks.len(),
         "bootstrap complete"
     );
 
+    let (fill_tx, _fill_rx) = broadcast::channel::<Fill>(4096);
+    tokio::spawn(reader::core_reader_loop(read_framed, book.clone(), fill_tx.clone()));
+
+    // post orders, get orderbook, ws feeds for fills are pending.
+    tokio::signal::ctrl_c().await?;
+    info!("shutting down");
     Ok(())
 }
