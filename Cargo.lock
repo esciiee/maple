@@ -220,6 +220,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "maple-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "maple-proto",
+ "maple-transport",
+ "maple-types",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "maple-journal"
 version = "0.1.0"
 dependencies = [

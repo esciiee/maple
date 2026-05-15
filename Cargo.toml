@@ -7,6 +7,7 @@ members = [
     "proto",
     "transport",
     "core",
+    "gateway",
 ]
 
 [workspace.dependencies]
@@ -15,6 +16,8 @@ maple-orderbook = { path = "./orderbook" }
 maple-journal = { path = "./journal" }
 maple-proto = { path = "./proto" }
 maple-transport = { path = "./transport" }
+maple-gateway = { path = "./gateway" }
+axum = { version = "0.7", features = ["ws"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 bytes = "1"
