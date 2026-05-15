@@ -204,13 +204,16 @@ name = "maple-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "disruptor",
+ "futures",
  "maple-journal",
  "maple-orderbook",
  "maple-proto",
  "maple-transport",
  "maple-types",
  "parking_lot",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
