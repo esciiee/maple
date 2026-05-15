@@ -6,3 +6,4 @@ members = [
 
 [workspace.dependencies]
 maple-types = { path = "./types" }
+serde = { version = "1", features = ["derive"] }
