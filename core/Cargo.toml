@@ -1,0 +1,21 @@
+[package]
+name = "maple-core"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "maple-core"
+path = "src/main.rs"
+
+[dependencies]
+maple-types = { workspace = true }
+maple-orderbook = { workspace = true }
+maple-journal = { workspace = true }
+maple-proto = { workspace = true }
+maple-transport = { workspace = true }
+disruptor = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

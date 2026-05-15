@@ -6,6 +6,7 @@ members = [
     "journal",
     "proto",
     "transport",
+    "core",
 ]
 
 [workspace.dependencies]
@@ -21,3 +22,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
+disruptor = { git = "https://github.com/esciiee/disruptor-rs", branch = "feat/mutable-state" }
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
