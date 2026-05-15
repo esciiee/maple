@@ -2,8 +2,6 @@ use maple_types::{EngineEvent, Order, OrderbookSnapshot};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GatewayMsg {
     SubmitOrder { order: Order },
