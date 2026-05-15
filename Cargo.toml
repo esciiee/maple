@@ -8,6 +8,7 @@ members = [
     "transport",
     "core",
     "gateway",
+    "bench",
 ]
 
 [workspace.dependencies]
