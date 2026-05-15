@@ -11,7 +11,7 @@ use maple_transport::FramedStream;
 use maple_types::{EngineEvent, Order, OrderbookSnapshot};
 use parking_lot::Mutex;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 #[derive(Default)]
@@ -36,6 +36,8 @@ enum OutMsg {
     Snapshot(OrderbookSnapshot),
 }
 
+// Each connected gateway gets one mpsc. The publish stage sends to all of them
+// for broadcast events, and to the specific conn for snapshot replies.
 type ConnMap = Arc<Mutex<HashMap<u64, mpsc::Sender<CoreMsg>>>>;
 
 #[tokio::main]
@@ -85,13 +87,13 @@ async fn main() -> anyhow::Result<()> {
         EventKind::Empty => {}
     };
 
-    let (bcast_tx, _bcast_rx_template) = broadcast::channel::<CoreMsg>(4096);
     let conn_map: ConnMap = Arc::new(Mutex::new(HashMap::new()));
-
-    let publish_bcast_tx = bcast_tx.clone();
     let publish_conn_map = conn_map.clone();
 
-    // 3. Publishing results back to Gateway
+    // 3. Publishing results back to gateways.
+    //    EngineEvent → fan-out to every connected gateway's mpsc.
+    //    SnapshotReply → targeted send to the requesting gateway's mpsc.
+    //    Both go through the same per-connection channel, guaranteeing order.
     let publish_closure = move |event: &mut Event, _seq: i64, _eob: bool| {
         let Some(out) = event.result.take() else {
             return;
@@ -99,12 +101,17 @@ async fn main() -> anyhow::Result<()> {
         match *out {
             OutMsg::Event(ee) => {
                 let msg = CoreMsg::Event { event: ee };
-                let _ = publish_bcast_tx.send(msg);
+                let map = publish_conn_map.lock();
+                for tx in map.values() {
+                    if let Err(e) = tx.try_send(msg.clone()) {
+                        warn!(error = %e, "event drop: gateway channel full or closed");
+                    }
+                }
             }
             OutMsg::Snapshot(snap) => {
                 let msg = CoreMsg::SnapshotReply { snap };
-                let sender = publish_conn_map.lock().get(&event.conn_id).cloned();
-                if let Some(tx) = sender {
+                let map = publish_conn_map.lock();
+                if let Some(tx) = map.get(&event.conn_id) {
                     if let Err(e) = tx.try_send(msg) {
                         warn!(conn_id = event.conn_id, error = %e, "snapshot drop");
                     }
@@ -136,10 +143,9 @@ async fn main() -> anyhow::Result<()> {
         let conn_id = conn_counter.fetch_add(1, Ordering::Relaxed);
         info!(conn_id, %peer, "accepted");
         let producer = producer.clone();
-        let bcast_tx = bcast_tx.clone();
         let conn_map = conn_map.clone();
         tokio::spawn(async move {
-            handle_connection(stream, conn_id, producer, bcast_tx, conn_map).await;
+            handle_connection(stream, conn_id, producer, conn_map).await;
             info!(conn_id, "connection closed");
         });
     }
@@ -149,17 +155,19 @@ async fn handle_connection(
     stream: TcpStream,
     conn_id: u64,
     mut producer: MultiProducer<Event, SingleConsumerBarrier>,
-    bcast_tx: broadcast::Sender<CoreMsg>,
     conn_map: ConnMap,
 ) {
     let framed = maple_transport::frame(stream);
     let (sink, mut read_stream) = framed.split();
 
-    let (targeted_tx, targeted_rx) = mpsc::channel::<CoreMsg>(64);
-    conn_map.lock().insert(conn_id, targeted_tx);
+    // Register this connection before publishing any events so the publish
+    // stage sees it immediately. The SnapshotRequest is published after
+    // registration, so the snapshot and all subsequent events are enqueued
+    // in the correct order into this channel.
+    let (tx, rx) = mpsc::channel::<CoreMsg>(256);
+    conn_map.lock().insert(conn_id, tx);
 
-    let bcast_rx = bcast_tx.subscribe();
-    let write_task = tokio::spawn(write_loop(sink, bcast_rx, targeted_rx));
+    let write_task = tokio::spawn(write_loop(sink, rx));
 
     loop {
         match read_stream.next().await {
@@ -194,31 +202,11 @@ async fn handle_connection(
     write_task.abort();
 }
 
-// warning, select! does not preserve cross-channel insertion order. A broadcast
-// event (seq=N+1) can be written before a target snapshot reply (seq=N)
-// even though the publish processor enqueued them in the correct order.
-// easier fix is to replace dual-channel select! with a single mpsc per connection.
-// best job here is to include write loop as part of the events processor pipeline, eliminating the need for channels and select! altogether.
 async fn write_loop(
     mut sink: SplitSink<FramedStream, bytes::Bytes>,
-    mut bcast_rx: broadcast::Receiver<CoreMsg>,
-    mut targeted_rx: mpsc::Receiver<CoreMsg>,
+    mut rx: mpsc::Receiver<CoreMsg>,
 ) {
-    loop {
-        let msg = tokio::select! {
-            r = bcast_rx.recv() => match r {
-                Ok(m) => m,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "broadcast lagged");
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
-            r = targeted_rx.recv() => match r {
-                Some(m) => m,
-                None => break,
-            },
-        };
+    while let Some(msg) = rx.recv().await {
         let payload = match serde_json::to_vec(&msg) {
             Ok(p) => p,
             Err(e) => {
