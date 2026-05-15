@@ -1,3 +1,5 @@
+mod book;
+
 use futures::StreamExt;
 use maple_proto::{CoreMsg, GatewayMsg};
 use maple_transport::FramedStream;
@@ -71,10 +73,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let (_framed, snap) = bootstrap(&cfg).await?;
+
+    let mut local_book = book::LocalBook::default();
+    local_book.apply_snapshot(&snap);
     info!(
-        snap_seq = snap.seq,
-        bids = snap.bids.len(),
-        asks = snap.asks.len(),
+        snap_seq = local_book.seq,
+        bids = local_book.bids.len(),
+        asks = local_book.asks.len(),
         "bootstrap complete"
     );
 
