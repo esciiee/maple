@@ -2,13 +2,20 @@ mod book;
 mod reader;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use bytes::Bytes;
 use futures::StreamExt;
 use maple_proto::{CoreMsg, GatewayMsg};
-use maple_types::{Fill, OrderbookSnapshot};
+use maple_types::{Fill, Order, OrderbookSnapshot, Side};
+use serde::Deserialize;
 use tokio::net::TcpStream;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::info;
 
@@ -30,6 +37,20 @@ fn load_config() -> anyhow::Result<Config> {
     let http_addr = std::env::var("HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
     Ok(Config { gateway_id, core_addr, http_addr })
+}
+
+#[derive(Clone)]
+struct AppState {
+    book: Arc<RwLock<LocalBook>>,
+    core_write: Arc<Mutex<FramedWrite<tokio::net::tcp::OwnedWriteHalf, LengthDelimitedCodec>>>,
+    fill_tx: Arc<broadcast::Sender<Fill>>,
+    gateway_id: u16,
+    order_counter: Arc<AtomicU64>,
+}
+
+fn next_order_id(gateway_id: u16, counter: &AtomicU64) -> u64 {
+    let local = counter.fetch_add(1, Ordering::Relaxed);
+    (gateway_id as u64) << 48 | (local & 0x0000_FFFF_FFFF_FFFF)
 }
 
 fn make_codec() -> LengthDelimitedCodec {
@@ -60,8 +81,6 @@ async fn bootstrap(
     info!(gateway_id = cfg.gateway_id, "sent Subscribe");
 
     // Discard any Event frames that arrive before the SnapshotReply.
-    // See DESIGN.md "KNOWN ORDERING HAZARD" — the select! in core's write_loop
-    // can deliver a broadcast event before the targeted snapshot reply.
     let snap = loop {
         match read_framed.next().await {
             Some(Ok(frame)) => match serde_json::from_slice::<CoreMsg>(&frame)? {
@@ -75,6 +94,57 @@ async fn bootstrap(
 
     info!(snap_seq = snap.seq, "received snapshot");
     Ok((read_framed, write_framed, snap))
+}
+
+#[derive(Deserialize)]
+struct SubmitRequest {
+    side: Side,
+    price: u64,
+    qty: u64,
+}
+
+async fn post_orders(
+    State(state): State<AppState>,
+    Json(req): Json<SubmitRequest>,
+) -> impl IntoResponse {
+    if req.price == 0 || req.qty == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "price and qty must be non-zero"})),
+        )
+            .into_response();
+    }
+
+    let id = next_order_id(state.gateway_id, &state.order_counter);
+    let order = Order { id, side: req.side, price: req.price, qty: req.qty };
+    let msg = GatewayMsg::SubmitOrder { order };
+    let payload = match serde_json::to_vec(&msg) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to encode order");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut w = state.core_write.lock().await;
+    if futures::SinkExt::send(&mut *w, Bytes::from(payload)).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "core unavailable"})),
+        )
+            .into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"id": id}))).into_response()
+}
+
+async fn get_orderbook(State(state): State<AppState>) -> impl IntoResponse {
+    let b = state.book.read().await;
+    Json(serde_json::json!({
+        "seq":  b.seq,
+        "bids": b.bids,
+        "asks": b.asks,
+    }))
 }
 
 #[tokio::main]
@@ -94,22 +164,33 @@ async fn main() -> anyhow::Result<()> {
         "maple-gateway starting"
     );
 
-    let (read_framed, _write_framed, snap) = bootstrap(&cfg).await?;
+    let (read_framed, write_framed, snap) = bootstrap(&cfg).await?;
 
     let book = Arc::new(RwLock::new(LocalBook::default()));
     book.write().await.apply_snapshot(&snap);
-    info!(
-        snap_seq = snap.seq,
-        bids = snap.bids.len(),
-        asks = snap.asks.len(),
-        "bootstrap complete"
-    );
+    info!(snap_seq = snap.seq, bids = snap.bids.len(), asks = snap.asks.len(), "bootstrap complete");
 
-    let (fill_tx, _fill_rx) = broadcast::channel::<Fill>(4096);
-    tokio::spawn(reader::core_reader_loop(read_framed, book.clone(), fill_tx.clone()));
+    let (fill_tx, _) = broadcast::channel::<Fill>(4096);
+    let fill_tx = Arc::new(fill_tx);
 
-    // post orders, get orderbook, ws feeds for fills are pending.
-    tokio::signal::ctrl_c().await?;
-    info!("shutting down");
+    tokio::spawn(reader::core_reader_loop(read_framed, book.clone(), (*fill_tx).clone()));
+
+    let state = AppState {
+        book,
+        core_write: Arc::new(Mutex::new(write_framed)),
+        fill_tx,
+        gateway_id: cfg.gateway_id,
+        order_counter: Arc::new(AtomicU64::new(1)),
+    };
+
+    let router = Router::new()
+        .route("/orders", post(post_orders))
+        .route("/orderbook", get(get_orderbook))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(&cfg.http_addr).await?;
+    info!(http_addr = %cfg.http_addr, "HTTP listener bound");
+
+    axum::serve(listener, router).await?;
     Ok(())
 }
